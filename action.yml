@@ -1,0 +1,159 @@
+name: SigmaStudio+ (headless)
+description: >
+  Install Analog Devices SigmaStudio+ on a Windows runner from your own privately
+  staged installer, then run its headless console app (build, export) from your
+  workflow. Contains no Analog Devices software.
+author: Joseph Telaak
+branding:
+  icon: cpu
+  color: blue
+
+inputs:
+  installer-url:
+    description: >
+      Where your SigmaStudio+ installer is staged, privately. A GitHub release-asset
+      API URL (https://api.github.com/repos/<owner>/<repo>/releases/assets/<id>) or
+      any HTTPS URL that answers with the file. Pass it from a secret.
+    required: true
+  token:
+    description: >
+      Bearer token sent with the download, e.g. a fine-grained token with
+      Contents: read on the private repo. Pass it from a secret. Empty: no header.
+    required: false
+    default: ''
+  installer-sha256:
+    description: >
+      Expected sha256 of the installer. Recommended: the download is refused when it
+      does not match, and it keys the install cache.
+    required: false
+    default: ''
+  run:
+    description: >
+      PowerShell to run once SigmaStudio+ is installed. $env:SSPLUS_CONSOLE is the
+      console app (SStudioPlusConsole.exe) and $env:SSPLUS_HOME its install folder.
+    required: false
+    default: ''
+  install-timeout-minutes:
+    description: Minutes to wait for each silent-install attempt before killing it.
+    required: false
+    default: '10'
+
+outputs:
+  console:
+    description: Full path of SStudioPlusConsole.exe.
+    value: ${{ steps.find.outputs.console }}
+  home:
+    description: The SigmaStudio+ install folder.
+    value: ${{ steps.find.outputs.home }}
+
+runs:
+  using: composite
+  steps:
+    - name: Check the runner
+      shell: pwsh
+      run: |
+        if ($env:RUNNER_OS -ne 'Windows') { "::error::SigmaStudio+ is Windows-only; use a Windows runner"; exit 1 }
+        New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\ssplus" | Out-Null
+
+    - name: Fetch the installer
+      shell: pwsh
+      env:
+        URL: ${{ inputs.installer-url }}
+        TOKEN: ${{ inputs.token }}
+        SHA: ${{ inputs.installer-sha256 }}
+      run: |
+        $out = "$env:RUNNER_TEMP\ssplus\setup.exe"
+        $h = @{ Accept = 'application/octet-stream' }
+        if ($env:TOKEN) { $h.Authorization = "Bearer $env:TOKEN" }
+        Invoke-WebRequest -Uri $env:URL -Headers $h -OutFile $out
+        $got = (Get-FileHash $out -Algorithm SHA256).Hash.ToLower()
+        "installer: $((Get-Item $out).Length) bytes, sha256 $got"
+        if ($env:SHA -and $got -ne $env:SHA.ToLower()) { "::error::installer sha256 $got, expected $env:SHA"; exit 1 }
+
+    # The installer technology is read off the binary. SigmaStudio+ 3.x ships as
+    # a classic InstallShield setup.exe around an MSI, so /s /v"/qn" (silent
+    # wrapper, quiet MSI) goes first; without /qn the MSI comes up with its full
+    # UI and waits at a dialog nobody can see on a runner, so every attempt is
+    # bounded and killed if it hangs, and the next one tried.
+    - name: Install silently
+      shell: pwsh
+      env:
+        LIMIT: ${{ inputs.install-timeout-minutes }}
+      run: |
+        $exe = "$env:RUNNER_TEMP\ssplus\setup.exe"
+        $logs = "$env:RUNNER_TEMP\ssplus"
+        $text = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($exe))
+        $kind = switch -Regex ($text) {
+          'Inno Setup'                    { 'inno'; break }
+          'Nullsoft'                      { 'nsis'; break }
+          'WixBundle|WiX Toolset|\.wixburn' { 'burn'; break }
+          'ISSetupStream|InstallShield'   { 'installshield'; break }
+          default                         { 'unknown' }
+        }
+        "installer type: $kind"
+        $attempts = switch ($kind) {
+          'inno'          { ,"/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /LOG=`"$logs\setup.log`"" }
+          'nsis'          { ,'/S' }
+          'burn'          { ,"/quiet /norestart /log `"$logs\setup.log`"" }
+          'installshield' { "/s /v`"/qn REBOOT=ReallySuppress /l*v \`"$logs\msi.log\`"`"",
+                            "/silent /debuglog`"$logs\suite.log`"" }
+          default         { '/silent', '/S', '/quiet /norestart', '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART' }
+        }
+        function Find-Console {
+          Get-ChildItem -Path 'C:\Program Files', 'C:\Program Files (x86)', 'C:\Analog Devices' `
+            -Recurse -Filter SStudioPlusConsole.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+        }
+        # The files are in place within seconds; what can hang is the MSI's last
+        # step, which runs dpinst64 to install the Cypress USB driver for ADI's USBi
+        # programming dongle (CAInstallDriverCyUSB64x64, measured on a runner). Its
+        # /SW hides the wizard but not Windows' "install this device software?"
+        # prompt, so it waits forever. CI never talks to hardware: once the console
+        # app exists the installer gets 30 s to exit, then dpinst64 is stopped.
+        function Stop-Tree($id) {
+          Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -eq $id } |
+            ForEach-Object { Stop-Tree $_.ProcessId }
+          Stop-Process -Id $id -Force -ErrorAction SilentlyContinue
+        }
+        foreach ($a in $attempts) {
+          "--- attempt: $a"
+          $p = Start-Process -FilePath $exe -ArgumentList $a -PassThru
+          $deadline = (Get-Date).AddMinutes([int]$env:LIMIT); $found = $null
+          while (-not $p.HasExited -and (Get-Date) -lt $deadline) {
+            if (-not $found -and (Find-Console)) { $found = Get-Date; "    console app in place" }
+            if ($found -and ((Get-Date) - $found).TotalSeconds -gt 30) { break }
+            Start-Sleep -Seconds 5
+          }
+          if (-not $p.HasExited) {
+            $dp = Get-Process dpinst64, dpinst -ErrorAction SilentlyContinue
+            if ($found -and $dp) {
+              "    installed; stuck in the USB-driver step (dpinst), not needed here: stopping it"
+              $dp | Stop-Process -Force -ErrorAction SilentlyContinue
+              if (-not $p.WaitForExit(120 * 1000)) { Stop-Tree $p.Id }
+            } else {
+              "    still running at the limit: killed (waiting on a dialog?)"
+              Stop-Tree $p.Id
+            }
+          } else {
+            "    exit code: $($p.ExitCode)"
+          }
+          if (Find-Console) { "    installed"; exit 0 }
+        }
+        Get-ChildItem $logs -Filter *.log -ErrorAction SilentlyContinue | ForEach-Object { "== $($_.Name)"; Get-Content $_ -Tail 40 }
+        "::error::SigmaStudio+ did not install silently"; exit 1
+
+    - name: Find the console app
+      id: find
+      shell: pwsh
+      run: |
+        $c = Get-ChildItem -Path 'C:\Program Files', 'C:\Program Files (x86)', 'C:\Analog Devices' `
+               -Recurse -Filter SStudioPlusConsole.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+        "console=$($c.FullName)" >> $env:GITHUB_OUTPUT
+        "home=$($c.Directory.Parent.FullName)" >> $env:GITHUB_OUTPUT
+        "SSPLUS_CONSOLE=$($c.FullName)" >> $env:GITHUB_ENV
+        "SSPLUS_HOME=$($c.Directory.Parent.FullName)" >> $env:GITHUB_ENV
+        "console: $($c.FullName)"
+
+    - name: Run
+      if: inputs.run != ''
+      shell: pwsh
+      run: ${{ inputs.run }}

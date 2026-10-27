@@ -92,7 +92,7 @@ static class Program
             }
             catch (TargetInvocationException e)
             {
-                Console.Error.WriteLine($"{name}: {Inner(e).Message}");
+                Console.Error.WriteLine($"{name}: {Inner(e)}");
                 if (allowFail) continue;
                 return 1;
             }

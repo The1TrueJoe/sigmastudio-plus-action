@@ -30,13 +30,22 @@ inputs:
   run:
     description: >
       PowerShell to run once SigmaStudio+ is installed. $env:SSPLUS_CONSOLE is the
-      console app (SStudioPlusConsole.exe) and $env:SSPLUS_HOME its install folder.
+      console app (SStudioPlusConsole.exe), $env:SSPLUS_HOME its install folder and,
+      with script-host 'true', $env:SSPLUS_SCRIPT the scripting host.
     required: false
     default: ''
   install-timeout-minutes:
     description: Minutes to wait for each silent-install attempt before killing it.
     required: false
     default: '10'
+  script-host:
+    description: >
+      'true' builds ssplus-script.exe, which runs a SigmaStudio+ scripting session
+      (the documented scripting API's calls, from a JSON file) headless and
+      in-process, without the GUI that normally hosts the scripting server.
+      $env:SSPLUS_SCRIPT is its path. Built here against the installed SigmaStudio+.
+    required: false
+    default: 'false'
 
 outputs:
   console:
@@ -45,6 +54,9 @@ outputs:
   home:
     description: The SigmaStudio+ install folder.
     value: ${{ steps.find.outputs.home }}
+  script:
+    description: Full path of ssplus-script.exe, with script-host 'true'.
+    value: ${{ steps.host.outputs.script }}
 
 runs:
   using: composite
@@ -152,6 +164,26 @@ runs:
         "SSPLUS_CONSOLE=$($c.FullName)" >> $env:GITHUB_ENV
         "SSPLUS_HOME=$($c.Directory.Parent.FullName)" >> $env:GITHUB_ENV
         "console: $($c.FullName)"
+
+    # Built against the installed assemblies and placed beside the console app,
+    # with its config, so it resolves SigmaStudio+'s assemblies and plugin folders
+    # exactly as the console app does.
+    - name: Build the scripting host
+      id: host
+      if: inputs.script-host == 'true'
+      shell: pwsh
+      env:
+        SRC: ${{ github.action_path }}/host
+      run: |
+        $hostDir = "$env:SSPLUS_HOME\Host"
+        $out = "$env:RUNNER_TEMP\ssplus\host"
+        dotnet build $env:SRC -c Release -nologo -v q "-p:SsPlusHost=$hostDir" -o $out
+        if ($LASTEXITCODE) { "::error::ssplus-script did not build"; exit 1 }
+        Copy-Item "$out\ssplus-script.exe" $hostDir -Force
+        Copy-Item "$hostDir\SStudioPlusConsole.exe.config" "$hostDir\ssplus-script.exe.config" -Force
+        "script=$hostDir\ssplus-script.exe" >> $env:GITHUB_OUTPUT
+        "SSPLUS_SCRIPT=$hostDir\ssplus-script.exe" >> $env:GITHUB_ENV
+        "script host: $hostDir\ssplus-script.exe"
 
     - name: Run
       if: inputs.run != ''

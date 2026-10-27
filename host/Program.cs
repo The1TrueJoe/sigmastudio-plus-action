@@ -124,12 +124,14 @@ static class Program
     // is not Thrift plumbing is the call.
     static Dictionary<string, Target> LoadScriptingApi(ISdkFacade facade)
     {
+        // The installer puts the plugins in ProgramData\Analog Devices\SigmaStudio <ver>\Plugins.
+        var adi = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "Analog Devices");
         var dll = facade.GetPluginFolders()
+            .Concat(Directory.Exists(adi) ? Directory.GetDirectories(adi, "Plugins", SearchOption.AllDirectories) : new string[0])
             .Select(d => Path.Combine(d, "ScriptingAPISS+.dll"))
-            .FirstOrDefault(File.Exists)
-            ?? Directory.GetFiles(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-                                  "ScriptingAPISS+.dll", SearchOption.AllDirectories).FirstOrDefault();
+            .FirstOrDefault(File.Exists);
         if (dll == null) throw new FileNotFoundException("ScriptingAPISS+.dll is not in any SigmaStudio+ plugin folder");
+        Console.WriteLine("scripting API: " + dll);
         var plumbing = new HashSet<string> { "ProcessFunction", "RegisterProcess", "MsgToAdd" };
         var api = new Dictionary<string, Target>(StringComparer.OrdinalIgnoreCase);
         foreach (var t in Assembly.LoadFrom(dll).GetExportedTypes())

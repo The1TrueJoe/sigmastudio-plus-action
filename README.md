@@ -56,13 +56,65 @@ jobs:
 | `installer-sha256` | expected hash; the download is refused on a mismatch |
 | `run` | PowerShell to run afterwards, with `$env:SSPLUS_CONSOLE` and `$env:SSPLUS_HOME` set |
 | `install-timeout-minutes` | per-attempt limit for the silent install (default 10) |
+| `script-host` | `'true'` also builds the scripting host (below) and sets `$env:SSPLUS_SCRIPT` |
 
 | Output | |
 |---|---|
 | `console` | full path of `SStudioPlusConsole.exe` |
 | `home` | the SigmaStudio+ install folder |
+| `script` | full path of `ssplus-script.exe`, with `script-host: 'true'` |
 
-Both are also exported to later steps as `SSPLUS_CONSOLE` and `SSPLUS_HOME`.
+They are also exported to later steps as `SSPLUS_CONSOLE`, `SSPLUS_HOME` and
+`SSPLUS_SCRIPT`.
+
+## Scripting a design headless
+
+SigmaStudio+'s scripting API (AddShape, AddConnection, UpdateProperties,
+LinkCompileDownload, Export, ...) is served over Thrift by the GUI only. With
+`script-host: 'true'` the action builds a small host, `ssplus-script.exe`, on
+the runner against the installed SigmaStudio+. It makes the same SDK facade the
+console app makes, without a GUI, and calls the scripting API's own classes in
+process. The calls, their arguments and their results are the documented API's.
+Nothing of SigmaStudio+ is in this repository; the host is compiled against the
+copy you installed.
+
+```powershell
+& $env:SSPLUS_SCRIPT design.json logs   # logs: where sigmastudio.log goes
+```
+
+The design is a JSON array of calls, run in order; the first that reports
+failure stops it with exit code 1:
+
+```json
+[
+  ["OpenExistingProject", "${env:TEMPLATE}"],
+  ["MigrateTarget", "ADAU1452_0", "ADAU1451", true],
+  {"call": "AddShapeV2", "args": ["schematic", "AnalogDevices.Plugins.Algorithms.IO.Sigma300.Sample.ASRCInput_v1.0.0.0", [100, 100]], "as": "in"},
+  ["AddConnectionV2", "${in}", "Ch0_out", "MultipleVolumeControl_1", "Input0"],
+  ["LinkCompileConnect"],
+  ["Export", "my-dsp", "${env:OUT}\\export"]
+]
+```
+
+* An array is a call's name, then its arguments. An object adds `"as"` (keep the
+  UID the call reports as `${name}`) and `"allow-fail"`.
+* `${env:NAME}` is an environment variable.
+* `[x, y]` is a Position (or a Size); arguments otherwise follow the call's
+  parameter types.
+* `LinkCompileConnect` compiles without hardware; no USBi is needed.
+* A plugin's short name works when it is unique; otherwise give its full name
+  (`GetAllPlugins` lists them).
+
+What the API cannot do, learned the hard way:
+
+* **It cannot add a PC (controller) shape**, and the compiler refuses a system
+  whose processor has no host link. Start from a project that has one:
+  SigmaStudio+'s own examples (`ProgramData\Analog Devices\SigmaStudio <ver>\
+  Plugins\Templates`) do. Open one, `MigrateTarget` its processor to your part,
+  and replace its algorithms.
+* **A shape with links cannot be removed**: `RemoveConnectionV2` its pins first.
+* `CreateNewProject` creates the project and then fails reporting it (no shapes
+  yet); mark it `allow-fail` if you use it.
 
 ## How the install works
 

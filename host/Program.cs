@@ -17,7 +17,7 @@
 //   {"call": "AddConnectionV2", "args": ["${in}", "Ch0_out", "${out}", "Input"]}
 //
 // An array is the call's name then its arguments; an object adds "as" (keep the
-// UID the call reports, its last message's last word, as ${name}) and "allow-fail".
+// UID the call reports, the last word of its last message, as ${name}) and "allow-fail".
 // ${env:NAME} in a string is an environment variable.
 // Arguments follow the call's parameter types: a [x, y] pair is a Position or
 // Size, an array of numbers a list, anything else its string form. A call that
@@ -106,7 +106,7 @@ static class Program
             if (keep != null)
             {
                 var last = lines.LastOrDefault(l => !string.IsNullOrWhiteSpace(l)) ?? "";
-                vars[keep] = Regex.Match(last, @"(\S+)\s*$").Groups[1].Value.TrimEnd('.');
+                vars[keep] = Regex.Match(last, @"([^\s:]+)\s*$").Groups[1].Value.TrimEnd('.');
                 Console.WriteLine($"  ${{{keep}}} = {vars[keep]}");
             }
         }
